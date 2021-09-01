@@ -70,15 +70,16 @@ end
 
 
 #read in csv file: requires CSV and DataFrames
-df = DataFrame(CSV.File("C:\\Users\\Andrea.Havron\\Documents\\github\\FIMSsoftware\\data\\gompertz\\gompertz_n100.csv"))
+datadir = joinpath(@__DIR__, "..", "..", "data")
+df = DataFrame(CSV.File(joinpath(datadir, "gompertz", "gompertz_n128.csv")))
 # . syntax extracts column from dataframe and casts as vector
 gompertzDat = df.y
-gompertzInits = load("C:\\Users\\Andrea.Havron\\Documents\\github\\FIMSsoftware\\data\\gompertz\\gompertzInits_n100.RData")
+gompertzInits = load(joinpath(datadir, "gompertz", "gompertzInits_n128.RData"))
 #read in csv file: requires CSV and DataFrames
-df = DataFrame(CSV.File("C:\\Users\\Andrea.Havron\\Documents\\github\\FIMSsoftware\\data\\logistic\\logistic_n100.csv"))
+df = DataFrame(CSV.File(joinpath(datadir, "logistic", "logistic_n128.csv")))
 # . syntax extracts column from dataframe and casts as vector
 logisticDat = df.y
-logisticInits = load("C:\\Users\\Andrea.Havron\\Documents\\github\\FIMSsoftware\\data\\logistic\\logisticInits_n100.RData")
+logisticInits = load(joinpath(datadir, "logistic", "logisticInits_n128.RData"))
 
 
 model = gompertz(gompertzDat, 0)

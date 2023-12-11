@@ -3,14 +3,18 @@ using DataFrames
 using RData
 using Turing
 using Distributions
+# using Optimization
+# using OptimizationOptimJL, OptimizationOptimisers
 using Optim
 using Memoization
 using Zygote
 using ReverseDiff
+using FiniteDiff
 using FileIO
+using StatsPlots
 
 #Gompertz model
-@model function gompertz(y, pr_type)
+@model function gompertz(y, pr_type, ::Type{T} = Float64) where {T}
     if pr_type == 0
         #these priors work
         alpha ~ Uniform(-5,5)
@@ -26,22 +30,21 @@ using FileIO
     #Unifrom(-10,10) prior works with pr_type=0
     u_init ~ Uniform(-10,10) #not the ideal way to specify an improper prior?
     n = size(y)[1]
-    umed = Vector(undef, n)
-    u = Vector(undef, n)
+    umed = Vector{T}(undef, n)
+    u = Vector{T}(undef, n)
     umed[1] = u_init
     u[1] ~ Normal(umed[1], sigma)
+    y[1] ~ Normal(u[1], tau)
     for t in 2:n
         umed[t] = alpha + beta*u[t-1]
         u[t] ~ Normal(umed[t], sigma)
-    end
-    for t in 1:n
         y[t] ~ Normal(u[t], tau)
     end
 end
 
 
 #Logistic growth model
-@model function logistic(y, pr_type)
+@model function logistic(y, pr_type, ::Type{T} = Float64) where {T}
     if pr_type == 0
         r ~ Uniform(0.01,5)
         K ~ Uniform(0.01,1000)
@@ -55,15 +58,14 @@ end
     end
     u_init ~ Uniform(0.01,100)
     n = size(y)[1]
-    umed = Vector(undef, n)
-    u = Vector(undef, n)
+    umed = Vector{T}(undef, n)
+    u = Vector{T}(undef, n)
     umed[1] = u_init
     u[1] ~ LogNormal(umed[1], sigma)
+    y[1] ~ LogNormal(log(u[1]), tau)
     for t in 2:n
         umed[t] = u[t-1] + r*u[t-1]*(1-u[t-1]/K)
         u[t] ~ LogNormal(log(umed[t]), sigma)
-    end
-    for t in 1:n
         y[t] ~ LogNormal(log(u[t]), tau)
     end
 end
@@ -75,6 +77,8 @@ df = DataFrame(CSV.File(joinpath(datadir, "gompertz", "gompertz_n128.csv")))
 # . syntax extracts column from dataframe and casts as vector
 gompertzDat = df.y
 gompertzInits = load(joinpath(datadir, "gompertz", "gompertzInits_n128.RData"))
+plot(gompertzDat)
+
 #read in csv file: requires CSV and DataFrames
 df = DataFrame(CSV.File(joinpath(datadir, "logistic", "logistic_n128.csv")))
 # . syntax extracts column from dataframe and casts as vector
@@ -83,52 +87,55 @@ logisticInits = load(joinpath(datadir, "logistic", "logisticInits_n128.RData"))
 
 
 model = gompertz(gompertzDat, 0)
-mle_estimate = optimize(model,MLE())
+# Check model for type-stability: see tips at
+# https://turing.ml/dev/docs/using-turing/performancetips#make-your-model-type-stable
+@code_warntype model.f(
+    model,
+    Turing.VarInfo(model),
+    Turing.DefaultContext(),
+    model.args...,
+)
+
+
 #Default Forward mode, not timed but takes long time (~1hr)
 #TrackerAD: 1791 seconds - now 754 sec using 1000 burn-in and 0.8 adaptive sampling
 #Zygote: didn't work: mutating arrays not supported
 #ReverseDiff: 505 sec using 1000 burn-in and 0.8 adaptive sampling
 #NUTS() working but not same as default STAN/tmbstan settings (2000,0.8)
 Turing.setadbackend(:reversediff)
-@time sampNUTSgompertzP0 = sample(gompertz(gompertzDat,0), NUTS(2000,0.8), 4000, nchains = 4, init_theta = gompertzInits)
+Turing.setrdcache(true)
+mle_estimate = optimize(model, MLE(), BFGS())
+map_estimate = optimize(model, MAP(), BFGS())
+H = FiniteDiff.finite_difference_hessian(u -> mle_estimate.f(u), vec(mle_estimate.values))
+
+
+@time sampNUTSgompertzP0 = sample(model, NUTS(), MCMCThreads(), 2000, 4,
+    init_theta = gompertzInits)
+# 102 s first time, 73 s after compilation
 describe(sampNUTSgompertzP0)
-save('MCMCgompertzPO.jl',sampNUTSgompertzP0)
-#TrackerAD: 44.5 sec
-#Zygote: didn't work: mutating arrays not supported
-#ReverseDiff: 20 sec, 3140 sec after chaging settings and running first, 20 sec after running a third time: 3120 sec to compile?
-@time sampNUTSgompertzP1 = sample(gompertz(gompertzDat,1), NUTS(1000,0.8), 2000, nchains = 4, init_theta = gompertzInits)
-describe(sampNUTSgompertzP0)
+
+using MonteCarloMeasurements
+ribbonplot([Particles(collect(col)) for col in  eachcol(Array(group(sampNUTSgompertzP0, :u)))],
+    label="Gompertz P0")
+
+CSV.write(joinpath(@__DIR__, "MCMCgompertzP0.csv"), sampNUTSgompertzP0)
+
+model1 = gompertz(gompertzDat, 1)
+@time sampNUTSgompertzP1 = sample(model1, NUTS(1000,0.8), 2000, nchains = 4,
+    init_theta = gompertzInits)
+# 90 s
+describe(sampNUTSgompertzP1)
+ribbonplot!([Particles(collect(col)) for col in  eachcol(Array(group(sampNUTSgompertzP1, :u)))],
+    label="Gompertz P1")
+plot!(mle_estimate.values[6:end], label="MLE")
+plot!(map_estimate.values[6:end], label="MAP")
+
 alpha = mean(sampNUTSgompertzP0[:alpha])
 beta = mean(sampNUTSgompertzP0[:beta])
 sigma = mean(sampNUTSgompertzP0[:sigma])
 tau = mean(sampNUTSgompertzP0[:tau])
-CSV.write("MCMCgompertzP0.csv", describe(sampNUTSgompertzP0))
+CSV.write(joinpath(@__DIR__, "MCMCgompertzP1.csv"), sampNUTSgompertzP1)
 params = summarystats(sampNUTSgompertzP0)
 
-ess(sampNUTSgompertzP0)
-ess = ess(describe(sampNUTSgompertzP0)[1])
-@time sample(gompertz(gompertzDat,0), NUTS(2000, 0.8), 2000, nchains = 4, init_theta = gompertzInits)
 
-
-sampNUTSlogistic = sample(logistic(logisticDat,1), NUTS(0.65), 1000)
-
-# MLE models
-
-using NLsolve
-
-@model function gompertz_mle(y, alpha, beta, u_init, u)
-    n = size(y)[1]
-    umed = Vector(undef, n)
-    u = Vector(undef, n)
-    umed[1] = u_init
-    u[1] ~ Normal(umed[1], sigma)
-    for t in 2:n
-        umed[t] = alpha + beta*u[t-1]
-        u[t] ~ Normal(umed[t], sigma)
-    end
-    for t in 1:n
-        y[t] ~ Normal(u[t], tau)
-    end
-end
-
-nlsolve(gompertz(gompertzDat, 0), gompertzInits, autodiff = :forward)
+sampNUTSlogistic = sample(logistic(logisticDat, 0), NUTS(1000, 0.8), 1000)
